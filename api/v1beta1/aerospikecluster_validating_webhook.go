@@ -154,7 +154,7 @@ func (c *AerospikeCluster) validate(aslog logr.Logger) error {
 	}
 	if strings.Contains(c.Namespace, " ") {
 		// Few parsing logic depend on this
-		return fmt.Errorf("aerospikeCluster name cannot have spaces")
+		return fmt.Errorf("aerospikeCluster namespace cannot have spaces")
 	}
 
 	// Validate image type. Only enterprise image allowed for now

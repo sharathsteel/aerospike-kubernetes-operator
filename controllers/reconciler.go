@@ -56,7 +56,9 @@ func (r *SingleClusterReconciler) Reconcile() (ctrl.Result, error) {
 		return reconcile.Result{}, err
 	}
 
-	// Handle previously failed cluster
+	// // TODO: Removing it for now, to check bad rack
+	// // Need to think about how to deal with this func
+	// // Handle previously failed cluster
 	if err := r.checkPreviouslyFailedCluster(); err != nil {
 		return reconcile.Result{}, err
 	}
@@ -220,6 +222,9 @@ func (r *SingleClusterReconciler) createStatus() error {
 
 	if newAeroCluster.Status.Pods == nil {
 		newAeroCluster.Status.Pods = map[string]asdbv1beta1.AerospikePodStatus{}
+	}
+	if len(newAeroCluster.Status.UnhealthyRacks) == 0 {
+		newAeroCluster.Status.UnhealthyRacks = []asdbv1beta1.UnhealthyRack{}
 	}
 
 	if err = r.Client.Status().Update(
@@ -501,16 +506,19 @@ func (r *SingleClusterReconciler) checkPreviouslyFailedCluster() error {
 			"It's not a new cluster, " +
 				"checking if it is failed and needs recovery",
 		)
-		hasFailed, err := r.hasClusterFailed()
-		if err != nil {
-			return fmt.Errorf(
-				"error determining if cluster has failed: %v", err,
-			)
-		}
+		// // TODO: Removing it for now, to check bad rack
+		// // Need to think about how to deal with this func
 
-		if hasFailed {
-			return r.recoverFailedCreate()
-		}
+		// hasFailed, err := r.hasClusterFailed()
+		// if err != nil {
+		// 	return fmt.Errorf(
+		// 		"error determining if cluster has failed: %v", err,
+		// 	)
+		// }
+
+		// if hasFailed {
+		// 	return r.recoverFailedCreate()
+		// }
 	}
 	return nil
 }

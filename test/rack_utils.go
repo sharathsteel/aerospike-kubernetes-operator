@@ -385,12 +385,24 @@ func validateSTSPodsForRack(
 	return nil
 }
 
+func getEnabledRacks(aeroCluster *asdbv1beta1.AerospikeCluster) []asdbv1beta1.Rack {
+	var enabledRacks []asdbv1beta1.Rack
+	for _, rack := range aeroCluster.Spec.RackConfig.Racks {
+		if !rack.Disabled {
+			enabledRacks = append(enabledRacks, rack)
+		}
+	}
+	return enabledRacks
+}
+
 func getConfiguredRackStateList(aeroCluster *asdbv1beta1.AerospikeCluster) []RackState {
+	enabledRacks := getEnabledRacks(aeroCluster)
+
 	topology := splitRacks(
-		int(aeroCluster.Spec.Size), len(aeroCluster.Spec.RackConfig.Racks),
+		int(aeroCluster.Spec.Size), len(enabledRacks),
 	)
 	var rackStateList []RackState
-	for idx, rack := range aeroCluster.Spec.RackConfig.Racks {
+	for idx, rack := range enabledRacks {
 		if topology[idx] == 0 {
 			// Skip the rack, if it's size is 0
 			continue

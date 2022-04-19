@@ -35,7 +35,7 @@ spec:
             description: AerospikeClusterSpec defines the desired state of AerospikeCluster
             properties:
               aerospikeAccessControl:
-                description: AerospikeAccessControl has the Aerospike roles and users
+                description: Has the Aerospike roles and users definitions.
                 properties:
                   adminPolicy:
                     description: AerospikeClientAdminPolicy specify the aerospike
@@ -2733,6 +2733,10 @@ spec:
                     items:
                       type: string
                     type: array
+                  podsPerRackPercentage:
+                    description: podsPerRackPercentage is percentage of minimum cluster
+                      pods in a singl
+                    type: integer
                   racks:
                     description: Racks is the list of all racks
                     items:
@@ -2743,6 +2747,9 @@ spec:
                             for this Rack.
                           type: object
                           x-kubernetes-preserve-unknown-fields: true
+                        disabled:
+                          description: Disabled flag will disable this rack.
+                          type: boolean
                         effectiveAerospikeConfig:
                           description: Effective/operative Aerospike config.
                           type: object
@@ -4896,6 +4903,10 @@ spec:
                       type: object
                     nullable: true
                     type: array
+                  skipUnhealthyRack:
+                    description: SkipUnhealthyRack will skip Unhealthy rack (as identified
+                      by the opera
+                    type: boolean
                 type: object
               seedsFinderServices:
                 description: SeedsFinderServices creates additional Kubernetes service
@@ -5364,6 +5375,7 @@ spec:
             properties:
               aerospikeAccessControl:
                 description: AerospikeAccessControl has the Aerospike roles and users
+                  definitions.
                 properties:
                   adminPolicy:
                     description: AerospikeClientAdminPolicy specify the aerospike
@@ -8176,6 +8188,10 @@ spec:
                     items:
                       type: string
                     type: array
+                  podsPerRackPercentage:
+                    description: podsPerRackPercentage is percentage of minimum cluster
+                      pods in a singl
+                    type: integer
                   racks:
                     description: Racks is the list of all racks
                     items:
@@ -8186,6 +8202,9 @@ spec:
                             for this Rack.
                           type: object
                           x-kubernetes-preserve-unknown-fields: true
+                        disabled:
+                          description: Disabled flag will disable this rack.
+                          type: boolean
                         effectiveAerospikeConfig:
                           description: Effective/operative Aerospike config.
                           type: object
@@ -10339,6 +10358,10 @@ spec:
                       type: object
                     nullable: true
                     type: array
+                  skipUnhealthyRack:
+                    description: SkipUnhealthyRack will skip Unhealthy rack (as identified
+                      by the opera
+                    type: boolean
                 type: object
               resources:
                 description: Define resources requests and limits for Aerospike Server
@@ -10805,6 +10828,19 @@ spec:
                     - name
                     x-kubernetes-list-type: map
                 type: object
+              unhealthyRacks:
+                description: UnhealthyRacks is list of racks where operator is unable
+                  to schedule p
+                items:
+                  properties:
+                    id:
+                      description: Identifier for the rack
+                      type: integer
+                    lastRetriedTime:
+                      format: date-time
+                      type: string
+                  type: object
+                type: array
               validationPolicy:
                 description: ValidationPolicy controls validation of the Aerospike
                   cluster resource

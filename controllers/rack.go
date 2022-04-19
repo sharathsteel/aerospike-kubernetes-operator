@@ -93,7 +93,7 @@ func (r *SingleClusterReconciler) reconcileRacks() reconcileResult {
 		}
 	}
 
-	if len(r.aeroCluster.Status.RackConfig.Racks) != 0 {
+	if len(racksToDelete) > 0 {
 		// Remove removed racks
 		if res := r.deleteRacks(racksToDelete, ignorablePods); !res.isSuccess {
 			if res.err != nil {
@@ -391,6 +391,21 @@ func (r *SingleClusterReconciler) scaleUpRack(
 			),
 		)
 	}
+
+	// // TODO: Check this only if failOverRack flag is configured
+	// if err := r.checkSTSPodsSchedulability(found); err != nil {
+	// 	r.Log.Error(err, "Failed to schedule pods in rack")
+
+	// 	// Mark rack unhealthy so that sts can be deleted
+	// 	if err := r.markAndUpdateRackUnhealthy(); err != nil {
+	// 		return found, reconcileError(
+	// 			fmt.Errorf(
+	// 				"failed to mark and update unhealthy rack status: %v", err,
+	// 			),
+	// 		)
+	// 	}
+	// 	return found, reconcileRequeueAfter(0)
+	// }
 
 	if err := r.waitForSTSToBeReady(found); err != nil {
 		return found, reconcileError(
@@ -1050,12 +1065,48 @@ func splitRacks(nodes, racks int) []int {
 	return topology
 }
 
+func getEnabledRacks(racks []asdbv1beta1.Rack) []asdbv1beta1.Rack {
+	var enabledRacks []asdbv1beta1.Rack
+	for _, rack := range racks {
+		if !rack.Disabled {
+			enabledRacks = append(enabledRacks, rack)
+		}
+	}
+	return enabledRacks
+}
+
+// func getConfiguredRackStateListOld(aeroCluster *asdbv1beta1.AerospikeCluster) []RackState {
+
+// 	enabledHealthyRacks := getEnabledRacks(getHealthyRacks(aeroCluster))
+
+// 	topology := splitRacks(
+// 		int(aeroCluster.Spec.Size), len(enabledHealthyRacks),
+// 	)
+// 	var rackStateList []RackState
+// 	for idx, rack := range enabledHealthyRacks {
+// 		if topology[idx] == 0 {
+// 			// Skip the rack, if it's size is 0
+// 			continue
+// 		}
+// 		rackStateList = append(
+// 			rackStateList, RackState{
+// 				Rack: rack,
+// 				Size: topology[idx],
+// 			},
+// 		)
+// 	}
+// 	return rackStateList
+// }
+
 func getConfiguredRackStateList(aeroCluster *asdbv1beta1.AerospikeCluster) []RackState {
+
+	availableRacks := getAvailableRacks(aeroCluster)
+
 	topology := splitRacks(
-		int(aeroCluster.Spec.Size), len(aeroCluster.Spec.RackConfig.Racks),
+		int(aeroCluster.Spec.Size), len(availableRacks),
 	)
 	var rackStateList []RackState
-	for idx, rack := range aeroCluster.Spec.RackConfig.Racks {
+	for idx, rack := range availableRacks {
 		if topology[idx] == 0 {
 			// Skip the rack, if it's size is 0
 			continue
@@ -1068,6 +1119,134 @@ func getConfiguredRackStateList(aeroCluster *asdbv1beta1.AerospikeCluster) []Rac
 		)
 	}
 	return rackStateList
+}
+
+func getAvailableRacks(aeroCluster *asdbv1beta1.AerospikeCluster) []asdbv1beta1.Rack {
+	noOfRequiredRacks := noOfRequiredRacks(aeroCluster)
+
+	availableRacks := getEnabledRacks(getHealthyRacks(aeroCluster))
+
+	// Return healthy racks if they are enough
+	if noOfRequiredRacks <= len(availableRacks) {
+		return availableRacks[:noOfRequiredRacks]
+	}
+
+	// Return healthy and minimum needed unhealthy racks
+	noOfUnhealthyRacksNeeded := noOfRequiredRacks - len(availableRacks)
+	if noOfUnhealthyRacksNeeded >= 0 {
+		var unhealthyRacks []asdbv1beta1.Rack
+		if noOfUnhealthyRacksNeeded > len(getUnhealthyRacks(aeroCluster)) {
+			// TODO: log this as error
+			// Flow should never come here
+			// noOfUnhealthyRacksNeeded can never be more than total unhealthyRacks
+			noOfUnhealthyRacksNeeded = len(getUnhealthyRacks(aeroCluster))
+		}
+
+		unhealthyRacks = getRequiredUnhealthyRacks(aeroCluster, noOfUnhealthyRacksNeeded)
+		availableRacks = append(availableRacks, unhealthyRacks...)
+	}
+	return availableRacks
+}
+
+func noOfRequiredRacks(aeroCluster *asdbv1beta1.AerospikeCluster) int {
+	enabledRacks := getEnabledRacks(aeroCluster.Spec.RackConfig.Racks)
+	if int(aeroCluster.Spec.Size) < len(enabledRacks) {
+		return int(aeroCluster.Spec.Size)
+	}
+	if aeroCluster.Spec.RackConfig.PodsPerRackPercentage != 0 {
+		return 100 / aeroCluster.Spec.RackConfig.PodsPerRackPercentage
+	}
+	return len(enabledRacks)
+}
+
+// func noOfUnhealthyRacksNeeded(aeroCluster *asdbv1beta1.AerospikeCluster, enabledHealthyRacks []asdbv1beta1.Rack) int {
+// 	noOfRequiredRacks := noOfRequiredRacks(aeroCluster)
+
+// 	if len(enabledHealthyRacks) >= noOfRequiredRacks {
+// 		return 0
+// 	}
+// 	return noOfRequiredRacks - len(enabledHealthyRacks)
+// }
+
+func getRequiredUnhealthyRacks(aeroCluster *asdbv1beta1.AerospikeCluster, noOfRacks int) []asdbv1beta1.Rack {
+	// Sort unhealthy racks based on lastRetryTime
+	var sortedRacks []asdbv1beta1.UnhealthyRack
+	sortedRacks = append(sortedRacks, aeroCluster.Status.UnhealthyRacks...)
+
+	for i := 0; i < len(sortedRacks); i++ {
+		for j := i + 1; j < len(sortedRacks); j++ {
+			if sortedRacks[i].LastRetriedTime.Time.After(sortedRacks[j].LastRetriedTime.Time) {
+				tmp := sortedRacks[i]
+				sortedRacks[i] = sortedRacks[j]
+				sortedRacks[j] = tmp
+			}
+		}
+	}
+
+	// Get Actual rack config for required unhealthy racks
+	var racks []asdbv1beta1.Rack
+	for i := 0; i < noOfRacks; i++ {
+		rack := getRackByID(aeroCluster, sortedRacks[i].ID)
+		racks = append(racks, *rack)
+	}
+	return racks
+}
+
+// func noOfHealthyRacks(aeroCluster *asdbv1beta1.AerospikeCluster) int {
+// 	return len(getEnabledRacks(getHealthyRacks(aeroCluster)))
+// }
+
+// func isReconcilePossible(aeroCluster *asdbv1beta1.AerospikeCluster) bool {
+
+// 	// return noOfHealthyRacks(aeroCluster) >=  noOfRequiredRacks(aeroCluster)
+
+// 	return len(getEnabledRacks(aeroCluster.Spec.RackConfig.Racks)) >= noOfRequiredRacks(aeroCluster)
+// }
+
+// func isExtraHealthyRackAvailable(aeroCluster *asdbv1beta1.AerospikeCluster) bool {
+// 	enabledHealthyRacks := getEnabledRacks(getHealthyRacks(aeroCluster))
+// 	if int(aeroCluster.Spec.Size) < len(enabledHealthyRacks) {
+// 		return true
+// 	}
+// 	return false
+// }
+
+func getUnhealthyRacks(aeroCluster *asdbv1beta1.AerospikeCluster) []asdbv1beta1.Rack {
+	var unhealthyRacks []asdbv1beta1.Rack
+	for _, rack := range aeroCluster.Spec.RackConfig.Racks {
+		if !isRackHealthy(rack.ID, aeroCluster.Status.UnhealthyRacks) {
+			unhealthyRacks = append(unhealthyRacks, rack)
+		}
+	}
+	return unhealthyRacks
+}
+
+func getHealthyRacks(aeroCluster *asdbv1beta1.AerospikeCluster) []asdbv1beta1.Rack {
+	var healthyRacks []asdbv1beta1.Rack
+	for _, rack := range aeroCluster.Spec.RackConfig.Racks {
+		if isRackHealthy(rack.ID, aeroCluster.Status.UnhealthyRacks) {
+			healthyRacks = append(healthyRacks, rack)
+		}
+	}
+	return healthyRacks
+}
+
+func getRackByID(aeroCluster *asdbv1beta1.AerospikeCluster, id int) *asdbv1beta1.Rack {
+	for _, rack := range aeroCluster.Spec.RackConfig.Racks {
+		if rack.ID == id {
+			return &rack
+		}
+	}
+	return nil
+}
+
+func isRackHealthy(rackID int, unhealthyRacks []asdbv1beta1.UnhealthyRack) bool {
+	for _, unhealthyRack := range unhealthyRacks {
+		if unhealthyRack.ID == rackID {
+			return false
+		}
+	}
+	return true
 }
 
 // TODO: These func are available in client-go@v1.5.2, for now creating our own

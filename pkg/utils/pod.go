@@ -15,6 +15,27 @@ import (
 	"k8s.io/kubectl/pkg/scheme"
 )
 
+func CheckPodScheduling(pod *corev1.Pod) error {
+	if IsPodTerminating(pod) {
+		return nil
+	}
+	if pod.Status.Phase == corev1.PodUnknown {
+		return fmt.Errorf("pod %s status is %s", pod.Name, pod.Status.Phase)
+	}
+	if pod.Status.Phase == corev1.PodPending {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == corev1.PodScheduled {
+				// TODO: find if we need to check any other cond.Reason
+				if cond.Status == corev1.ConditionFalse && cond.Reason == "Unschedulable" {
+					return fmt.Errorf("pod condition %v", cond)
+				}
+				break
+			}
+		}
+	}
+	return nil
+}
+
 // IsPodRunningAndReady returns true if pod is in the PodRunning Phase, if it has a condition of PodReady.
 // TODO: check if its is properly running, error crashLoop also passed in this
 func IsPodRunningAndReady(pod *corev1.Pod) bool {

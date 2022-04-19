@@ -273,6 +273,11 @@ type RackConfig struct {
 	// Racks is the list of all racks
 	// +nullable
 	Racks []Rack `json:"racks,omitempty"`
+
+	// SkipUnhealthyRack will skip Unhealthy rack (as identified by the operator) and try to deploy pods in other racks
+	SkipUnhealthyRack bool `json:"skipUnhealthyRack,omitempty"`
+	// podsPerRackPercentage is percentage of minimum cluster pods in a single rack
+	PodsPerRackPercentage int `json:"podsPerRackPercentage,omitempty"`
 }
 
 // Rack specifies single rack config
@@ -301,6 +306,10 @@ type Rack struct {
 	InputPodSpec *RackPodSpec `json:"podSpec,omitempty"`
 	// Effective/operative PodSpec. The resultant is user input if specified else global PodSpec
 	PodSpec RackPodSpec `json:"effectivePodSpec,omitempty"`
+
+	// Disabled flag will disable this rack. No pod will be scheduled by operator.
+	// Pods from this rack will be distributed across other healthy racks
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // ValidationPolicySpec controls validation of the Aerospike cluster resource.
@@ -613,6 +622,15 @@ type AerospikeClusterStatus struct {
 	// Pods has Aerospike specific status of the pods. This is map instead of the conventional map as list convention to allow each pod to patch update its own status. The map key is the name of the pod.
 	// +patchStrategy=strategic
 	Pods map[string]AerospikePodStatus `json:"pods" patchStrategy:"strategic"`
+
+	// UnhealthyRacks is list of racks where operator is unable to schedule pods
+	UnhealthyRacks []UnhealthyRack `json:"unhealthyRacks,omitempty"`
+}
+
+type UnhealthyRack struct {
+	// Identifier for the rack
+	ID              int         `json:"id,omitempty"`
+	LastRetriedTime metav1.Time `json:"lastRetriedTime,omitempty"`
 }
 
 // AerospikeNetworkType specifies the type of network address to use.

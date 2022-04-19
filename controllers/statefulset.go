@@ -216,6 +216,16 @@ func (r *SingleClusterReconciler) createSTS(
 		"StatefulSet.Name", st.Name,
 	)
 
+	// // TODO: Check this only if failOverRack flag is configured
+	// if err := r.checkSTSPodsSchedulability(st); err != nil {
+	// 	r.Log.Error(err, "Failed to schedule pods in rack")
+	// 	// Mark rack unhealthy so that sts can be deleted
+	// 	if err := r.markAndUpdateRackUnhealthy(); err != nil {
+	// 		return st, fmt.Errorf("failed to mark and update unhealthy rack status: %v", err)
+	// 	}
+	// 	return st, err
+	// }
+
 	if err := r.waitForSTSToBeReady(st); err != nil {
 		return st, fmt.Errorf(
 			"failed to wait for statefulset to be ready: %v", err,
@@ -233,7 +243,253 @@ func (r *SingleClusterReconciler) deleteSTS(st *appsv1.StatefulSet) error {
 	return r.Client.Delete(context.TODO(), st)
 }
 
+// func (r *SingleClusterReconciler) waitForSTSToBeReadyOld(st *appsv1.StatefulSet) error {
+
+// 	const podStatusMaxRetry = 18
+// 	const podStatusRetryInterval = time.Second * 10
+
+// 	r.Log.Info(
+// 		"Waiting for statefulset to be ready", "WaitTimePerPod",
+// 		podStatusRetryInterval*time.Duration(podStatusMaxRetry),
+// 	)
+
+// 	var podIndex int32
+// 	for podIndex = 0; podIndex < *st.Spec.Replicas; podIndex++ {
+// 		podName := getSTSPodName(st.Name, podIndex)
+
+// 		var isReady bool
+// 		pod := &corev1.Pod{}
+
+// 		// Wait for 10 sec to pod to get started
+// 		for i := 0; i < 5; i++ {
+// 			if err := r.Client.Get(
+// 				context.TODO(),
+// 				types.NamespacedName{Name: podName, Namespace: st.Namespace},
+// 				pod,
+// 			); err == nil {
+// 				break
+// 			}
+// 			time.Sleep(time.Second * 2)
+// 		}
+
+// 		// Wait for pod to get ready
+// 		for i := 0; i < podStatusMaxRetry; i++ {
+// 			r.Log.V(1).Info(
+// 				"Check statefulSet pod running and ready", "pod", podName,
+// 			)
+
+// 			pod := &corev1.Pod{}
+// 			if err := r.Client.Get(
+// 				context.TODO(),
+// 				types.NamespacedName{Name: podName, Namespace: st.Namespace},
+// 				pod,
+// 			); err != nil {
+// 				return fmt.Errorf(
+// 					"failed to get statefulSet pod %s: %v", podName, err,
+// 				)
+// 			}
+// 			if err := utils.CheckPodFailed(pod); err != nil {
+// 				return fmt.Errorf("StatefulSet pod %s failed: %v", podName, err)
+// 			}
+// 			if utils.IsPodRunningAndReady(pod) {
+// 				isReady = true
+// 				r.Log.Info("Pod is running and ready", "pod", podName)
+// 				break
+// 			}
+
+// 			time.Sleep(podStatusRetryInterval)
+// 		}
+// 		if !isReady {
+// 			statusErr := fmt.Errorf(
+// 				"StatefulSet pod is not ready. Status: %v",
+// 				pod.Status.Conditions,
+// 			)
+// 			r.Log.Error(statusErr, "Statefulset Not ready")
+// 			return statusErr
+// 		}
+// 	}
+
+// 	// Check for statefulset at the end,
+// 	// if we check before pods then we would not know status of individual pods
+// 	const stsStatusMaxRetry = 10
+// 	const stsStatusRetryInterval = time.Second * 2
+
+// 	var updated bool
+// 	for i := 0; i < stsStatusMaxRetry; i++ {
+// 		time.Sleep(stsStatusRetryInterval)
+
+// 		r.Log.V(1).Info("Check statefulSet status is updated or not")
+
+// 		err := r.Client.Get(
+// 			context.TODO(),
+// 			types.NamespacedName{Name: st.Name, Namespace: st.Namespace}, st,
+// 		)
+// 		if err != nil {
+// 			return err
+// 		}
+// 		if *st.Spec.Replicas == st.Status.Replicas {
+// 			updated = true
+// 			break
+// 		}
+// 		r.Log.V(1).Info(
+// 			"StatefulSet spec.replica not matching status.replica", "status",
+// 			st.Status.Replicas, "spec", *st.Spec.Replicas,
+// 		)
+// 	}
+// 	if !updated {
+// 		return fmt.Errorf("statefulset status is not updated")
+// 	}
+
+// 	r.Log.Info("StatefulSet is ready")
+
+// 	return nil
+// }
+
 func (r *SingleClusterReconciler) waitForSTSToBeReady(st *appsv1.StatefulSet) error {
+	rackID, err := utils.GetRackIDFromSTSName(st.Name)
+	if err != nil {
+		return err
+	}
+
+	if schErr := r.checkSTSPodsSchedulability(st); schErr != nil {
+		r.Log.Error(schErr, "Failed to schedule pods in rack")
+
+		// Update this only if SkipUnhealthyRack flag is configured
+		if r.aeroCluster.Spec.RackConfig.SkipUnhealthyRack {
+			// Mark rack unhealthy so that sts can be deleted
+			if err := r.markAndUpdateUnhealthyRack(*rackID); err != nil {
+				return fmt.Errorf("failed to mark and update unhealthy rack status: %v", err)
+			}
+		}
+
+		return schErr
+	}
+
+	// Mark rack healthy if it was marked unhealthy
+	if err := r.markAndUpdateHealthyRack(*rackID); err != nil {
+		return err
+	}
+
+	if err := r.waitForSTSPodsToBeReady(st); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *SingleClusterReconciler) markAndUpdateHealthyRack(rackID int) error {
+	if isRackHealthy(rackID, r.aeroCluster.Status.UnhealthyRacks) {
+		return nil
+	}
+
+	r.Log.Info("Update unhealthy Racks status to healthy", "healthyRack", rackID)
+
+	newAeroCluster, err := r.getUpdatedAeroCluster()
+	if err != nil {
+		return err
+	}
+
+	var newUnhealthyRacks []asdbv1beta1.UnhealthyRack
+	for _, unhealthyRack := range newAeroCluster.Status.UnhealthyRacks {
+		if unhealthyRack.ID != rackID {
+			newUnhealthyRacks = append(newUnhealthyRacks, unhealthyRack)
+		}
+	}
+
+	newAeroCluster.Status.UnhealthyRacks = newUnhealthyRacks
+
+	if err := r.patchStatus(newAeroCluster); err != nil {
+		return fmt.Errorf("error updating status: %w", err)
+	}
+	r.aeroCluster = newAeroCluster
+
+	r.Log.Info("Updated unhealthy Racks status", "UnhealthyRacks", newAeroCluster.Status.UnhealthyRacks)
+
+	return nil
+}
+
+func (r *SingleClusterReconciler) markAndUpdateUnhealthyRack(rackID int) error {
+	unhealthyRack := asdbv1beta1.UnhealthyRack{
+		ID:              rackID,
+		LastRetriedTime: metav1.Now(),
+	}
+
+	r.Log.Info("Update unhealthy Racks status", "UnhealthyRack", unhealthyRack)
+
+	newAeroCluster, err := r.getUpdatedAeroCluster()
+	if err != nil {
+		return err
+	}
+
+	var updated bool
+	for idx, _ := range newAeroCluster.Status.UnhealthyRacks {
+		if newAeroCluster.Status.UnhealthyRacks[idx].ID == unhealthyRack.ID {
+			newAeroCluster.Status.UnhealthyRacks[idx] = unhealthyRack
+			updated = true
+			break
+		}
+	}
+
+	if !updated {
+		newAeroCluster.Status.UnhealthyRacks = append(newAeroCluster.Status.UnhealthyRacks, unhealthyRack)
+	}
+
+	if err := r.patchStatus(newAeroCluster); err != nil {
+		return fmt.Errorf("error updating status: %w", err)
+	}
+	r.aeroCluster = newAeroCluster
+
+	r.Log.Info("Updated unhealthy Racks status", "UnhealthyRacks", newAeroCluster.Status.UnhealthyRacks)
+
+	return nil
+}
+
+func (r *SingleClusterReconciler) getUpdatedAeroCluster() (*asdbv1beta1.AerospikeCluster, error) {
+	newAeroCluster := &asdbv1beta1.AerospikeCluster{}
+
+	namespacedName := types.NamespacedName{
+		Name: r.aeroCluster.Name, Namespace: r.aeroCluster.Namespace,
+	}
+
+	if err := r.Client.Get(context.TODO(), namespacedName, newAeroCluster); err != nil {
+		return nil, err
+	}
+	return newAeroCluster, nil
+}
+
+// func (r *SingleClusterReconciler) updateStatusRack(unhealthyRack asdbv1beta1.UnhealthyRack) error {
+
+// 	r.Log.Info("Updated unhealthy Racks status", "UnhealthyRack", unhealthyRack)
+
+// 	newAeroCluster, err := r.getUpdatedAeroCluster()
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	var updated bool
+// 	for idx, _ := range newAeroCluster.Status.UnhealthyRacks {
+// 		if newAeroCluster.Status.UnhealthyRacks[idx].ID == unhealthyRack.ID {
+// 			newAeroCluster.Status.UnhealthyRacks[idx] = unhealthyRack
+// 			updated = true
+// 			break
+// 		}
+// 	}
+
+// 	if !updated {
+// 		newAeroCluster.Status.UnhealthyRacks = append(newAeroCluster.Status.UnhealthyRacks, unhealthyRack)
+// 	}
+
+// 	if err := r.patchStatus(newAeroCluster); err != nil {
+// 		return fmt.Errorf("error updating status: %w", err)
+// 	}
+// 	r.aeroCluster = newAeroCluster
+
+// 	r.Log.Info("Updated unhealthy Racks status", "UnhealthyRacks", newAeroCluster.Status.UnhealthyRacks)
+
+// 	return nil
+// }
+
+func (r *SingleClusterReconciler) waitForSTSPodsToBeReady(st *appsv1.StatefulSet) error {
 
 	const podStatusMaxRetry = 18
 	const podStatusRetryInterval = time.Second * 10
@@ -331,6 +587,76 @@ func (r *SingleClusterReconciler) waitForSTSToBeReady(st *appsv1.StatefulSet) er
 	}
 
 	r.Log.Info("StatefulSet is ready")
+
+	return nil
+}
+
+// TODO: Should we check all pods in parallel
+func (r *SingleClusterReconciler) checkSTSPodsSchedulability(st *appsv1.StatefulSet) error {
+
+	const podStatusMaxRetry = 6
+	const podStatusRetryInterval = time.Second * 10
+
+	r.Log.Info(
+		"Waiting for statefulset pods to be scheduled", "WaitTimePerPod",
+		podStatusRetryInterval*time.Duration(podStatusMaxRetry),
+	)
+
+	var podIndex int32
+	for podIndex = 0; podIndex < *st.Spec.Replicas; podIndex++ {
+		podName := getSTSPodName(st.Name, podIndex)
+
+		var isScheduled bool
+		pod := &corev1.Pod{}
+
+		// Wait for 10 sec to pod to get started
+		for i := 0; i < 5; i++ {
+			if err := r.Client.Get(
+				context.TODO(),
+				types.NamespacedName{Name: podName, Namespace: st.Namespace},
+				pod,
+			); err == nil {
+				break
+			}
+			time.Sleep(time.Second * 2)
+		}
+
+		var err error
+		// Wait for pod to get ready
+		for i := 0; i < podStatusMaxRetry; i++ {
+			r.Log.V(1).Info(
+				"Check statefulSet pod to be scheduled", "pod", podName,
+			)
+
+			pod := &corev1.Pod{}
+			if err := r.Client.Get(
+				context.TODO(),
+				types.NamespacedName{Name: podName, Namespace: st.Namespace},
+				pod,
+			); err != nil {
+				return fmt.Errorf(
+					"failed to get statefulSet pod %s: %v", podName, err,
+				)
+			}
+
+			err = utils.CheckPodScheduling(pod)
+			if err == nil {
+				isScheduled = true
+				r.Log.Info("Pod is scheduled", "pod", podName)
+				break
+			}
+
+			time.Sleep(podStatusRetryInterval)
+		}
+		if !isScheduled {
+			statusErr := fmt.Errorf(
+				"StatefulSet pod is not scheduled. Status: %v",
+				pod.Status.Conditions,
+			)
+			r.Log.Error(statusErr, "Statefulset Not ready")
+			return statusErr
+		}
+	}
 
 	return nil
 }
